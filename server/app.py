@@ -16,9 +16,11 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path="../.env")
 
 # Security configuration
-API_KEY = os.getenv("API_KEY", "your-secure-api-key-here-change-this-in-production")
+API_KEY = os.getenv("API_KEY", "")
 
 # API Key authentication function
+
+
 async def verify_api_key(x_api_key: str = Header(...)):
     if x_api_key != API_KEY:
         raise HTTPException(
@@ -47,6 +49,8 @@ app.add_middleware(
 )
 
 # Pydantic models
+
+
 class CSVProcessRequest(BaseModel):
     filename: str = Field(..., min_length=1, max_length=255)
     data: str = Field(..., min_length=1)
@@ -57,6 +61,7 @@ class CSVProcessRequest(BaseModel):
             raise ValueError('Filename must end with .csv')
         return v
 
+
 class CSVProcessResponse(BaseModel):
     success: bool
     message: str
@@ -66,6 +71,8 @@ class CSVProcessResponse(BaseModel):
     processed_csv_data: str
 
 # Utility functions
+
+
 def validate_csv_content(csv_content: str) -> Dict[str, Any]:
     """Validate CSV content and return validation results"""
     try:
@@ -94,7 +101,8 @@ def validate_csv_content(csv_content: str) -> Dict[str, Any]:
             required_fields = ["name", "email", "phone"]
             for field in required_fields:
                 if field in row and not row[field].strip():
-                    row_validation["errors"].append(f"Missing required field: {field}")
+                    row_validation["errors"].append(
+                        f"Missing required field: {field}")
                     row_validation["is_valid"] = False
 
             # Email validation
@@ -108,7 +116,8 @@ def validate_csv_content(csv_content: str) -> Dict[str, Any]:
             if "phone" in row and row["phone"]:
                 phone_pattern = r'^\+?[\d\s\-\(\)]{10,}$'
                 if not regex.match(phone_pattern, row["phone"]):
-                    row_validation["warnings"].append("Phone number format may be invalid")
+                    row_validation["warnings"].append(
+                        "Phone number format may be invalid")
 
             if row_validation["is_valid"]:
                 valid_rows += 1
@@ -135,13 +144,17 @@ def validate_csv_content(csv_content: str) -> Dict[str, Any]:
         )
 
 # API Routes
+
+
 @app.get("/")
 async def root():
     return {"message": "Profile Verification System API", "version": "1.0.0", "status": "running"}
 
+
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
 
 @app.post("/api/process-csv", response_model=CSVProcessResponse)
 async def process_csv(
@@ -199,6 +212,7 @@ async def process_csv(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error processing CSV file: {str(e)}"
         )
+
 
 @app.post("/api/process-csv-data", response_model=CSVProcessResponse)
 async def process_csv_data(

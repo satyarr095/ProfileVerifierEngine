@@ -7,10 +7,12 @@ from datetime import datetime
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, status, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from fastapi.responses import StreamingResponse
 import uvicorn
-import regex
 from dotenv import load_dotenv
+
+# Import verification engine
+from verificationEngine import verify_csv_data
 
 # Load environment variables from root directory
 load_dotenv(dotenv_path="../.env")
@@ -49,7 +51,7 @@ app.add_middleware(
 )
 
 # Pydantic models
-
+from pydantic import BaseModel, Field, field_validator
 
 class CSVProcessRequest(BaseModel):
     filename: str = Field(..., min_length=1, max_length=255)
@@ -61,87 +63,12 @@ class CSVProcessRequest(BaseModel):
             raise ValueError('Filename must end with .csv')
         return v
 
-
 class CSVProcessResponse(BaseModel):
     success: bool
     message: str
     processed_rows: int
-    validation_results: List[Dict[str, Any]]
-    summary: Dict[str, Any]
     processed_csv_data: str
-
-# Utility functions
-
-
-def validate_csv_content(csv_content: str) -> Dict[str, Any]:
-    """Validate CSV content and return validation results"""
-    try:
-        # Parse CSV content
-        csv_reader = csv.DictReader(StringIO(csv_content))
-        rows = list(csv_reader)
-
-        if not rows:
-            raise ValueError("CSV file is empty or has no data rows")
-
-        # Basic validation results
-        validation_results = []
-        total_rows = len(rows)
-        valid_rows = 0
-
-        for i, row in enumerate(rows):
-            row_validation = {
-                "row_number": i + 1,
-                "is_valid": True,
-                "errors": [],
-                "warnings": [],
-                "data": row
-            }
-
-            # Check for empty required fields
-            required_fields = ["name", "email", "phone"]
-            for field in required_fields:
-                if field in row and not row[field].strip():
-                    row_validation["errors"].append(
-                        f"Missing required field: {field}")
-                    row_validation["is_valid"] = False
-
-            # Email validation
-            if "email" in row and row["email"]:
-                email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-                if not regex.match(email_pattern, row["email"]):
-                    row_validation["errors"].append("Invalid email format")
-                    row_validation["is_valid"] = False
-
-            # Phone validation (basic)
-            if "phone" in row and row["phone"]:
-                phone_pattern = r'^\+?[\d\s\-\(\)]{10,}$'
-                if not regex.match(phone_pattern, row["phone"]):
-                    row_validation["warnings"].append(
-                        "Phone number format may be invalid")
-
-            if row_validation["is_valid"]:
-                valid_rows += 1
-
-            validation_results.append(row_validation)
-
-        summary = {
-            "total_rows": total_rows,
-            "valid_rows": valid_rows,
-            "invalid_rows": total_rows - valid_rows,
-            "validation_rate": (valid_rows / total_rows) * 100 if total_rows > 0 else 0,
-            "headers": list(csv_reader.fieldnames) if csv_reader.fieldnames else []
-        }
-
-        return {
-            "validation_results": validation_results,
-            "summary": summary
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"CSV validation error: {str(e)}"
-        )
+    summary: Dict[str, Any]
 
 # API Routes
 
@@ -156,12 +83,96 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 
-@app.post("/api/process-csv", response_model=CSVProcessResponse)
-async def process_csv(
+@app.post("/api/process-csv-data", response_model=CSVProcessResponse)
+async def process_csv_data(
+    request: CSVProcessRequest,
+    _: bool = Depends(verify_api_key)
+):
+    """Process CSV data sent as JSON and return verified results"""
+
+    try:
+        print(f"Processing CSV data from: {request.filename}")
+        print(f"Input data length: {len(request.data)} characters")
+
+        # Process CSV data through verification engine
+        print("Calling verification engine...")
+        verified_csv_data = verify_csv_data(request.data)
+        
+        print(f"Verification engine returned {len(verified_csv_data)} characters")
+        print("Verification completed successfully")
+        
+        # Count processed rows
+        processed_rows = len(verified_csv_data.split('\n')) - 1  # Subtract header row
+        
+        # Calculate summary statistics
+        lines = verified_csv_data.split('\n')
+        if len(lines) > 1:  # Has data rows
+            # Parse CSV properly to get verification status
+            from io import StringIO
+            import csv
+            
+            try:
+                csv_reader = csv.DictReader(StringIO(verified_csv_data))
+                verified_count = 0
+                unverified_count = 0
+                
+                for row in csv_reader:
+                    # Check the Status column for verification status
+                    status = row.get('Status', '').strip()
+                    if status == 'Verified':
+                        verified_count += 1
+                    else:
+                        unverified_count += 1
+                
+                total_rows = verified_count + unverified_count
+                validation_rate = (verified_count / total_rows * 100) if total_rows > 0 else 0
+                
+            except Exception as e:
+                print(f"Error parsing CSV for summary: {e}")
+                # Fallback to simple counting
+                total_rows = len(lines) - 1  # Subtract header
+                verified_count = total_rows  # Assume all verified as fallback
+                unverified_count = 0
+                validation_rate = 100.0
+        else:
+            total_rows = 0
+            verified_count = 0
+            unverified_count = 0
+            validation_rate = 0
+        
+        summary = {
+            "total_rows": total_rows,
+            "valid_rows": verified_count,
+            "invalid_rows": unverified_count,
+            "validation_rate": validation_rate
+        }
+        
+        print(f"Summary: {summary}")
+        
+        return CSVProcessResponse(
+            success=True,
+            message="Profile verification completed successfully",
+            processed_rows=processed_rows,
+            processed_csv_data=verified_csv_data,
+            summary=summary
+        )
+
+    except Exception as e:
+        print(f"Error during verification: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error verifying profiles: {str(e)}"
+        )
+
+
+@app.post("/api/verify-profiles")
+async def verify_profiles(
     file: UploadFile = File(...),
     _: bool = Depends(verify_api_key)
 ):
-    """Process uploaded CSV file with validation and security checks"""
+    """Verify profiles from uploaded CSV file using verification engine"""
 
     # Security checks
     if not file.filename or not file.filename.endswith('.csv'):
@@ -182,23 +193,24 @@ async def process_csv(
         content = await file.read()
         csv_content = content.decode('utf-8')
 
-        print(f"Processing CSV file: {file.filename}")
-        print(f"File size: {len(content)} bytes")
+        print(f"Processing file: {file.filename}")
+        print(f"Input file size: {len(content)} bytes")
 
-        # Validate and process CSV
-        validation_data = validate_csv_content(csv_content)
-
-        print(f"Total rows: {validation_data['summary']['total_rows']}")
-        print(f"Valid rows: {validation_data['summary']['valid_rows']}")
-        print(f"Invalid rows: {validation_data['summary']['invalid_rows']}")
-
-        return CSVProcessResponse(
-            success=True,
-            message="CSV file processed successfully",
-            processed_rows=validation_data['summary']['total_rows'],
-            validation_results=validation_data['validation_results'],
-            summary=validation_data['summary'],
-            processed_csv_data=csv_content
+        # Process CSV data through verification engine
+        print("Calling verification engine...")
+        verified_csv_data = verify_csv_data(csv_content)
+        
+        print(f"Verification engine returned {len(verified_csv_data)} characters")
+        print("Verification completed successfully")
+        
+        # Generate output filename
+        output_filename = file.filename.replace('.csv', '_verified.csv')
+        
+        # Return verified CSV as downloadable file
+        return StreamingResponse(
+            iter([verified_csv_data]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={output_filename}"}
         )
 
     except UnicodeDecodeError:
@@ -207,46 +219,14 @@ async def process_csv(
             detail="File encoding error. Please ensure the file is UTF-8 encoded."
         )
     except Exception as e:
-        print(f"Error processing CSV: {str(e)}")
+        print(f"Error during verification: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error processing CSV file: {str(e)}"
+            detail=f"Error verifying profiles: {str(e)}"
         )
 
-
-@app.post("/api/process-csv-data", response_model=CSVProcessResponse)
-async def process_csv_data(
-    request: CSVProcessRequest,
-    _: bool = Depends(verify_api_key)
-):
-    """Process CSV data sent as JSON payload"""
-
-    try:
-        print(f"Processing CSV data from: {request.filename}")
-        print(f"Data length: {len(request.data)} characters")
-
-        # Validate and process CSV
-        validation_data = validate_csv_content(request.data)
-
-        print(f"Total rows: {validation_data['summary']['total_rows']}")
-        print(f"Valid rows: {validation_data['summary']['valid_rows']}")
-        print(f"Invalid rows: {validation_data['summary']['invalid_rows']}")
-
-        return CSVProcessResponse(
-            success=True,
-            message="CSV data processed successfully",
-            processed_rows=validation_data['summary']['total_rows'],
-            validation_results=validation_data['validation_results'],
-            summary=validation_data['summary'],
-            processed_csv_data=request.data
-        )
-
-    except Exception as e:
-        print(f"Error processing CSV data: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error processing CSV data: {str(e)}"
-        )
 
 if __name__ == "__main__":
     print("🚀 Starting Profile Verification Server...")

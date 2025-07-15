@@ -4,3 +4,6 @@ python-multipart>=0.0.6
 pydantic>=2.5.0
 regex
 python-dotenv
+pandas>=2.0.0
+duckduckgo-search>=3.9.0
+requests>=2.31.0

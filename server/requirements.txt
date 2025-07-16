@@ -5,5 +5,7 @@ pydantic>=2.5.0
 regex
 python-dotenv
 pandas>=2.0.0
-duckduckgo-search>=3.9.0
+ddgs>=0.1.0
 requests>=2.31.0
+ollama>=0.2.0
+beautifulsoup4>=4.12.0

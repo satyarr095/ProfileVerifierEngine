@@ -3,23 +3,43 @@ import json
 import requests
 from ddgs import DDGS
 from bs4 import BeautifulSoup
-import os
 from typing import Dict, List, Any
 from io import StringIO
 import ollama
+
+
+def is_valid_source(url: str) -> bool:
+    blocked_keywords = [
+    # Social Media Platforms
+    "linkedin.com", "facebook.com", "twitter.com", "x.com", "instagram.com", "tiktok.com",
+    "pinterest.com", "snapchat.com", "reddit.com", "tumblr.com", "threads.net", "discord.com",
+    "wechat.com", "weibo.com", "line.me", "kakao.com", "telegram.org", "quora.com",
+
+    # Video & Streaming Platforms
+    "youtube.com", "vimeo.com", "dailymotion.com", "bilibili.com", "twitch.tv",
+
+    # Code/Dev portfolios
+    "github.com", "gitlab.com", "bitbucket.org", "dev.to", "hashnode.dev", "glitch.com",
+    "replit.com", "sourceforge.net",
+
+    
+    # Misc. user-generated or unverifiable
+    "personal", "portfolio", "blog", "my-site", "me.", "homepage", "user", "profile"
+]
+    return not any(kw in url.lower() for kw in blocked_keywords)
 
 
 class ProfileVerificationEngine:
     def __init__(self):
         self.ddgs = DDGS()
         self.ollama_client = ollama.Client()
-        self.model_name = "llama3:8b"  # Using available model
+        self.model_name = "llama3:8b"
 
     def csv_to_json(self, csv_data: str) -> List[Dict[str, Any]]:
         df = pd.read_csv(StringIO(csv_data))
         return df.to_dict('records')
 
-    def search_web(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
+    def search_web(self, query: str, max_results: int = 7) -> List[Dict[str, str]]:
         try:
             results = self.ddgs.text(query, max_results=max_results)
             return [{"title": r["title"], "body": r["body"], "href": r["href"]} for r in results]
@@ -28,8 +48,10 @@ class ProfileVerificationEngine:
 
     def fetch_and_parse_pages(self, search_results: List[Dict[str, str]]) -> List[Dict[str, str]]:
         parsed_results = []
-        for result in search_results[:5]:  # limit to top 3 pages
+        for result in search_results:
             url = result.get("href")
+            if not is_valid_source(url):
+                continue
             try:
                 response = requests.get(url, timeout=5)
                 soup = BeautifulSoup(response.content, "html.parser")
@@ -38,7 +60,6 @@ class ProfileVerificationEngine:
                     "url": url,
                     "title": result.get("title", ""),
                     "snippet": result.get("body", ""),
-                    # limit text size to avoid prompt explosion
                     "content": text[:3000]
                 })
             except Exception as e:
@@ -48,71 +69,39 @@ class ProfileVerificationEngine:
                     "snippet": result.get("body", ""),
                     "content": f"Error fetching content: {str(e)}"
                 })
-        return parsed_results
+        return parsed_results[:5]
 
-    def verify_claim_with_llama3(self, profile_data: Dict[str, Any], search_results: List[Dict[str, str]]) -> Dict[str, Any]:
+    def verify_with_llama(self, profile_data, detailed_results):
         claim_to_verify = profile_data.get("Host Credential to Verify", "")
         full_name = profile_data.get("Full Name", "")
         claim_type = profile_data.get("Claim Type", "")
 
-        default_result = {
-            "Status": "Verified",
-            "Verified/Unverified": "Claims Partially Verified",
-            "Primary Reason": "Verification attempted with available information",
-            "Secondary Reason/Comments": f"Processed claim: {claim_to_verify}",
-            "Source Information 1": search_results[0].get("url", "") if search_results else "",
-            "Source Information 2": search_results[1].get("url", "") if len(search_results) > 1 else "",
-            "Source Information 3": search_results[2].get("url", "") if len(search_results) > 2 else ""
-        }
-
-        # Check if Ollama is available
-        try:
-            # Test if Ollama service is running
-            models = self.ollama_client.list()
-            available_models = [model.model for model in models.models]
-            print(f"DEBUG: Available models: {available_models}")
-            
-            if self.model_name not in available_models:
-                print(f"WARNING: Model {self.model_name} not found. Available models: {available_models}")
-                print(f"Please run: ollama pull {self.model_name}")
-                default_result["Primary Reason"] = f"Local model {self.model_name} not available"
-                default_result["Secondary Reason/Comments"] = f"Available models: {', '.join(available_models)}"
-                return default_result
-                
-        except ollama.ResponseError as e:
-            print(f"WARNING: Ollama API error - {str(e)}")
-            default_result["Primary Reason"] = f"Ollama API error: {str(e)}"
-            return default_result
-        except ConnectionError as e:
-            print(f"WARNING: Cannot connect to Ollama service - {str(e)}")
-            print("Make sure Ollama is running: ollama serve")
-            default_result["Primary Reason"] = "Cannot connect to Ollama service"
-            default_result["Secondary Reason/Comments"] = "Please start Ollama: ollama serve"
-            return default_result
-        except Exception as e:
-            print(f"WARNING: Ollama not available - {str(e)}")
-            print(f"Error type: {type(e).__name__}")
-            default_result["Primary Reason"] = f"Ollama error: {type(e).__name__}"
-            default_result["Secondary Reason/Comments"] = str(e)
-            return default_result
-
-        # Fetch actual web page content
-        detailed_results = self.fetch_and_parse_pages(search_results)
-
         prompt = f"""
-You are a fact-checking assistant. Analyze the following profile claim and web page content to determine if the claim is valid.
+You are a strict fact-checking assistant. Given a profile claim and supporting web documents, verify the claim according to the following rules:
 
-Profile Information:
+- NEVER use social media or personal/portfolio websites.
+- ONLY use third-party credible sources.
+- If evidence is from host's website only, label as "General Employment".
+- If public links verify background but not from credible third-party sources, label "Partially Verified".
+- Contradictory verified claims → "False Claim".
+- If enough info but unable to confirm → "Inconclusive Claim".
+- If org is permanently closed, label → "Establishment Permanently Closed".
+- No credible sources → "Unverifiable".
+- DO NOT return "Verified" unless a valid link is present.
+- Only ONE status per claim.
+- ALWAYS include Secondary Reason stating what is verified and what is not.
+
+Profile:
 - Full Name: {full_name}
 - Claim Type: {claim_type}
 - Claim to Verify: {claim_to_verify}
 
-Top Web Pages:
+Web Evidence:
 {json.dumps(detailed_results, indent=2)}
 
 Respond strictly in this JSON format:
 {{
-  "Status": "",
+  "Status": "",  // One of: Verified, Partially Verified, Unverifiable, Inconclusive Claim, False Claim, Establishment Permanently Closed
   "Verified/Unverified": "",
   "Primary Reason": "",
   "Secondary Reason/Comments": "",
@@ -122,54 +111,87 @@ Respond strictly in this JSON format:
 }}
 """
 
+        response = self.ollama_client.chat(
+            model=self.model_name,
+            messages=[
+                {"role": "system", "content": "You are a helpful fact-checking assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            options={
+                "temperature": 0.1,
+                "num_predict": 1000
+            }
+        )
+
+        content = response['message']['content']
+        json_str = content[content.find("{"):content.rfind("}") + 1]
+        return json.loads(json_str)
+
+    def verify_claim_with_llama3(self, profile_data: Dict[str, Any], search_results: List[Dict[str, str]]) -> Dict[str, Any]:
+        default_result = {
+            "Status": "Inconclusive Claim",
+            "Verified/Unverified": "",
+            "Primary Reason": "Default fallback",
+            "Secondary Reason/Comments": "",
+            "Source Information 1": "",
+            "Source Information 2": "",
+            "Source Information 3": ""
+        }
+
         try:
-            # Use local Ollama for inference
-            response = self.ollama_client.chat(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": "You are a helpful fact-checking assistant."},
-                    {"role": "user", "content": prompt}
-                ],
-                options={
-                    "temperature": 0.1,
-                    "num_predict": 1000
+            models = self.ollama_client.list()
+            available_models = [model.model for model in models.models]
+            if self.model_name not in available_models:
+                return {
+                    **default_result,
+                    "Primary Reason": f"Model {self.model_name} not available",
+                    "Secondary Reason/Comments": f"Available: {', '.join(available_models)}"
                 }
-            )
-            
-            content = response['message']['content']
-            json_str = content[content.find("{"):content.rfind("}") + 1]
-            result = json.loads(json_str)
-
-            for key in default_result:
-                if key not in result:
-                    result[key] = default_result[key]
-
-            return result
-
         except Exception as e:
-            print(f"Verification failed: {e}")
-            default_result["Primary Reason"] = f"Verification failed: {str(e)}"
-            return default_result
+            return {
+                **default_result,
+                "Primary Reason": f"Ollama error: {type(e).__name__}",
+                "Secondary Reason/Comments": str(e)
+            }
+
+        # First round
+        detailed_results = self.fetch_and_parse_pages(search_results)
+        try:
+            result = self.verify_with_llama(profile_data, detailed_results)
+            # Retry logic for certain fallback cases
+            if result.get("Status") in ["Inconclusive Claim", "Unverifiable"]:
+                print("🔁 Retrying with refined search...")
+                refined_query = f"{profile_data.get('Full Name')} {profile_data.get('Claim Type')} {profile_data.get('Host Credential to Verify')} site:.org OR site:.edu OR site:.gov"
+                refined_results = self.search_web(refined_query)
+                refined_detailed = self.fetch_and_parse_pages(refined_results)
+                result = self.verify_with_llama(profile_data, refined_detailed)
+        except Exception as e:
+            result = {
+                **default_result,
+                "Primary Reason": f"Verification failed: {str(e)}"
+            }
+
+        # Ensure fallbacks are filled
+        for i in range(1, 4):
+            key = f"Source Information {i}"
+            if key not in result:
+                result[key] = ""
+
+        return result
 
     def process_profile(self, profile_data: Dict[str, Any]) -> Dict[str, Any]:
-        full_name = profile_data.get("Full Name", "")
-        claim = profile_data.get("Host Credential to Verify", "")
-        claim_type = profile_data.get("Claim Type", "")
-
         result = profile_data.copy()
-
         try:
-            query = f"{full_name} {claim} {claim_type}"
+            query = f"{profile_data.get('Full Name')} {profile_data.get('Host Credential to Verify')} {profile_data.get('Claim Type')}"
             search_results = self.search_web(query)
-            verification_result = self.verify_claim_with_llama3(
-                profile_data, search_results)
+            verification_result = self.verify_claim_with_llama3(profile_data, search_results)
             result.update(verification_result)
         except Exception as e:
             result.update({
-                "Status": "Verified",
-                "Verified/Unverified": "Claims Partially Verified",
-                "Primary Reason": "Processing error occurred during verification",
-                "Secondary Reason/Comments": f"Error: {str(e)}",
+                "Status": "Inconclusive Claim",
+                "Verified/Unverified": "",
+                "Primary Reason": "Error during verification",
+                "Secondary Reason/Comments": str(e),
                 "Source Information 1": "",
                 "Source Information 2": "",
                 "Source Information 3": ""

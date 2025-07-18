@@ -220,27 +220,12 @@ export default function LandingPage() {
             setError("");
 
             try {
-                // First, get an access token
-                const tokenResponse = await fetch("http://localhost:8000/api/token", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                    },
-                });
-
-                if (!tokenResponse.ok) {
-                    throw new Error("Failed to get access token");
-                }
-
-                const tokenData = await tokenResponse.json();
-                const accessToken = tokenData.access_token;
-
-                // Send CSV data to FastAPI backend
+                // Send CSV data to FastAPI backend with API key authentication
                 const response = await fetch("http://localhost:8000/api/process-csv-data", {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/json",
-                        "Authorization": `Bearer ${accessToken}`,
+                        "X-API-Key": "ProfileVerifier-2024-SecureKey-MVP-d8f7a2b9c4e1f3g6h9j2k5l8m1n4o7p0q3r6s9t2u5v8w1x4y7z0",
                     },
                     body: JSON.stringify({
                         filename: fileName,
@@ -255,7 +240,7 @@ export default function LandingPage() {
 
                 const result = await response.json();
                 console.log("Processing result:", result);
-                
+
                 // Show success message or results
                 if (result.success) {
                     setProcessedResults(result);
@@ -460,7 +445,6 @@ export default function LandingPage() {
                                         tabIndex={0}
                                         onKeyDown={handleKeyPress}
                                         aria-label="Click to upload CSV file"
-                                        onClick={() => fileInputRef.current?.click()}
                                         initial={{ opacity: 0, scale: 0.95 }}
                                         animate={{ opacity: 1, scale: 1 }}
                                         transition={{ duration: 0.6, delay: 1.4 }}

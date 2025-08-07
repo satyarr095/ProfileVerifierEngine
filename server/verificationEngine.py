@@ -6,6 +6,7 @@ import os
 from typing import Dict, List, Any
 from io import StringIO
 
+
 class ProfileVerificationEngine:
     def __init__(self):
         self.ddgs = DDGS()
